@@ -3,6 +3,8 @@
 Application web qui reconnaît les cartes Pokémon avec la webcam ou l'appareil photo du téléphone.
 Tout s'exécute dans le navigateur : pas de serveur, pas de clé d'API.
 
+**En ligne : https://gregos-winus.github.io/pokecardex/**
+
 ## Fonctionnement
 
 1. **Cadrage** : l'application cherche les 4 bords de la carte, avec des droites détectées par une
@@ -26,7 +28,7 @@ Ce sont des fichiers statiques. Il suffit de les servir en HTTP. Ouvrir `index.h
 (`file://`) ne marche pas, à cause des modules JavaScript.
 
 ```bash
-cd pokescan
+cd pokecardex
 python3 -m http.server 8080
 # puis ouvrir http://localhost:8080
 ```
