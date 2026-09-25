@@ -1,5 +1,5 @@
 // Lecture du nom et du numéro d'une carte avec Tesseract.js (exécuté dans le navigateur).
-import { ZONES, extractZone } from './vision.js';
+import { ZONES, extractZone, adaptiveThreshold } from './vision.js';
 
 const TESS_LANG = { fr: 'fra', en: 'eng', de: 'deu', es: 'spa', it: 'ita', pt: 'por' };
 
@@ -46,29 +46,39 @@ function rawZone(card, zone, scale) {
   return out;
 }
 
-// Variantes de lecture du nom, de la plus rentable à la moins rentable (mesuré sur de vraies photos)
-const NAME_PASSES = [
-  card => [extractZone(card, ZONES.name, 2), 6],
-  card => [rawZone(card, ZONES.name, 2), 11],
-  card => [extractZone(card, ZONES.name, 2, true), 11], // texte clair sur fond sombre
-];
+// Variantes de lecture du nom, dans l'ordre de rentabilité mesuré sur 66 vraies photos
+export const NAME_PASSES = {
+  raw: card => [rawZone(card, ZONES.name, 2), 11], // couleur brute
+  adaptive: card => [adaptiveThreshold(extractZone(card, ZONES.name, 2)), 6], // binarisation locale
+  tight: card => [extractZone(card, ZONES.nameTight, 3), 11], // nom seul, sans les PV
+  inverted: card => [extractZone(card, ZONES.name, 2, true), 11], // texte clair sur fond sombre
+  below: card => [extractZone(card, ZONES.nameBelow, 2), 11], // nom sous un bandeau (anciennes cartes Dresseur)
+};
+const ALL_PASSES = ['raw', 'adaptive', 'tight', 'inverted', 'below'];
+
+// Bandeau « TRAINER » des anciennes cartes Dresseur : le nom est juste en dessous
+const BANNER = /tra[il1]n[eo]r|dresseur|entrenador|allenatore|treinador/i;
 
 /**
  * Lit les zones de texte d'une carte déjà recadrée (630×880).
- * Le nom est relu avec d'autres réglages tant que `isGood(texteCumulé)` est faux.
+ * Le nom est relu avec les variantes `passes` (dans l'ordre) tant que `isGood(texteCumulé)` est faux.
  */
-export async function readCard(card, lang, { onProgress, isGood, hasNumber, maxPasses = NAME_PASSES.length } = {}) {
+export async function readCard(card, lang, { onProgress, isGood, hasNumber, passes = ALL_PASSES, retryNumber = true } = {}) {
   const w = await getWorker(lang, onProgress);
   const texts = [];
   let nameCanvas = null;
-  for (const pass of NAME_PASSES.slice(0, maxPasses)) {
-    const [canvas, psm] = pass(card);
+  const queue = [...passes];
+  while (queue.length) {
+    const name = queue.shift();
+    const [canvas, psm] = NAME_PASSES[name](card);
     nameCanvas ??= canvas;
-    texts.push((await recognize(w, canvas, psm)).text);
+    const text = (await recognize(w, canvas, psm)).text;
+    texts.push(text);
     if (isGood?.(texts.join(' | '))) break;
+    if (BANNER.test(text) && !passes.includes('below') && !queue.includes('below')) queue.unshift('below');
   }
   const numberCanvas = extractZone(card, ZONES.number, 3);
   let numberText = (await recognize(w, numberCanvas, 11)).text;
-  if (!hasNumber?.(numberText)) numberText += ' | ' + (await recognize(w, rawZone(card, ZONES.number, 3), 11)).text;
+  if (retryNumber && !hasNumber?.(numberText)) numberText += ' | ' + (await recognize(w, rawZone(card, ZONES.number, 3), 11)).text;
   return { nameText: texts.join(' | '), numberText, nameCanvas, numberCanvas, passes: texts.length };
 }

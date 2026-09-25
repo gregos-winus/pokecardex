@@ -7,7 +7,34 @@ export const CARD_H = 880;
 export const ZONES = {
   name: { x: 0.02, y: 0.015, w: 0.96, h: 0.125 },
   number: { x: 0.0, y: 0.865, w: 1.0, h: 0.125 },
+  nameBelow: { x: 0.02, y: 0.12, w: 0.75, h: 0.12 },
+  nameTight: { x: 0.03, y: 0.02, w: 0.62, h: 0.09 },
 };
+
+let sharpCanvas = null;
+
+/** Netteté d'une zone : variance du laplacien sur une vignette en niveaux de gris. */
+export function sharpness(source, r, size = 240) {
+  const k = size / Math.max(r.w, r.h);
+  const w = Math.max(8, Math.round(r.w * k)), h = Math.max(8, Math.round(r.h * k));
+  sharpCanvas ??= makeCanvas(w, h);
+  if (sharpCanvas.width !== w || sharpCanvas.height !== h) { sharpCanvas.width = w; sharpCanvas.height = h; }
+  const ctx = ctx2d(sharpCanvas);
+  ctx.drawImage(source, r.x, r.y, r.w, r.h, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < g.length; i++) g[i] = d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114;
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w];
+      sum += l; sum2 += l * l; n++;
+    }
+  }
+  const mean = sum / n;
+  return sum2 / n - mean * mean;
+}
 
 export function makeCanvas(w, h) {
   const c = document.createElement('canvas');
@@ -52,6 +79,35 @@ export function extractZone(card, zone, scale = 2, invert = false) {
   }
   ctx.putImageData(img, 0, 0);
   return out;
+}
+
+/**
+ * Binarisation adaptative : chaque pixel est comparé à la moyenne de son voisinage.
+ * Plus robuste que le contraste global quand l'éclairage ou le fond varient le long du nom.
+ */
+export function adaptiveThreshold(canvas) {
+  const w = canvas.width, h = canvas.height, ctx = ctx2d(canvas);
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const I = new Float64Array((w + 1) * (h + 1)); // image intégrale
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      row += d[(y * w + x) * 4];
+      I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row;
+    }
+  }
+  const r = Math.max(8, Math.round(h / 3));
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r);
+      const mean = (I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0]) / ((x1 - x0) * (y1 - y0));
+      const o = (y * w + x) * 4;
+      d[o] = d[o + 1] = d[o + 2] = d[o] < mean - 10 ? 0 : 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
 }
 
 /**
@@ -141,7 +197,7 @@ export async function remoteSignature(url) {
  * @returns {{quad: {x:number,y:number}[], score:number}|null} coins HG, HD, BD, BG en coordonnées source
  */
 export function detectCard(source, region = { x: 0, y: 0, w: source.width, h: source.height }, opts = {}) {
-  const { max: MAX = 360, areaExp = 0.2, landscape = 0.4, outer = 0.4 } = opts;
+  const { max: MAX = 360, areaExp = 0.2, landscape = 0.4, outer = 0.4, outerMax = 1.4 } = opts;
   const k = Math.min(1, MAX / Math.max(region.w, region.h));
   const W = Math.max(8, Math.round(region.w * k)), H = Math.max(8, Math.round(region.h * k));
   const c = makeCanvas(W, H);
@@ -314,7 +370,8 @@ export function detectCard(source, region = { x: 0, y: 0, w: source.width, h: so
     const orient = q => { let a = 0; for (let m = 0; m < 4; m++) a += q[m].x * q[(m + 1) % 4].y - q[(m + 1) % 4].x * q[m].y; return a > 0 ? q : [...q].reverse(); };
     const bq = orient(best.pts);
     for (const q of quads) {
-      if (q.score < best.score * outer || q.area <= best.area) continue;
+      // bord extérieur de la carte : un peu plus grand seulement (pas le bord de la photo ou d'un livre)
+      if (q.score < best.score * outer || q.area <= best.area || q.area > best.area * outerMax) continue;
       const oq = orient(q.pts);
       if (bq.every(p => inside(oq, p)) && q.area > best.area) best = q;
     }

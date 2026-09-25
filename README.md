@@ -16,7 +16,12 @@ Tout s'exécute dans le navigateur : pas de serveur, pas de clé d'API.
    Si c'est encore insuffisant, on essaie un autre cadrage.
 3. **Rapprochement** : le texte lu est comparé à toute la base [TCGdex](https://tcgdex.dev) (FR, EN, DE, ES, IT, PT).
    La comparaison tolère les fautes de lecture. Le numéro et le total du set permettent de trouver l'édition exacte.
-4. **Vérification visuelle** : quand plusieurs cartes portent le même nom, l'image capturée est comparée aux
+4. **Scan automatique (vidéo)** : chaque lecture part de l'image la plus nette parmi plusieurs images rapprochées,
+   ce qui limite l'effet du tremblement de la main et de la mise au point. Les lectures successives votent pour
+   les cartes candidates, et une lecture ratée ne remet pas tout à zéro. D'une image à l'autre, l'application
+   essaie aussi d'autres cadrages et d'autres réglages d'OCR. La carte est retenue quand les indices suffisent :
+   en général 1 à 3 lectures.
+5. **Vérification visuelle** : quand plusieurs cartes portent le même nom, l'image capturée est comparée aux
    images officielles pour choisir la bonne illustration.
 
 On obtient ensuite la fiche de la carte (set, rareté, illustrateur, prix Cardmarket s'il est connu) et on peut
@@ -48,6 +53,7 @@ Sur le téléphone, on peut ensuite choisir « Ajouter à l'écran d'accueil » 
 
 ## Conseils pour une bonne reconnaissance
 
+- Tenir le téléphone à **15–20 cm** de la carte : plus près, beaucoup d'appareils photo ne font plus la mise au point.
 - Carte à plat, bien éclairée, sans reflet (les cartes holo reflètent beaucoup, inclinez légèrement la lumière).
 - Remplir le cadre : le **nom** doit être dans la zone pointillée du haut, le **numéro** dans celle du bas.
 - Sur téléphone, la lampe (🔦) aide à lire le petit numéro.
@@ -70,6 +76,8 @@ Sur le téléphone, on peut ensuite choisir « Ajouter à l'écran d'accueil » 
 ## Limites
 
 - Les cartes japonaises et coréennes ne sont pas prises en charge.
+- Les suffixes stylisés (EX, GX, V, VMAX…) sont souvent mal lus. Sans le numéro, l'édition trouvée peut être
+  la version sans suffixe du même Pokémon : choisissez la bonne carte dans « Autres possibilités ».
 - Les numéros spéciaux (`TG05/TG30`, `SWSH050`…) ne sont pas lus. La carte est alors trouvée par son nom et son illustration.
 - Les prix viennent de TCGdex quand ils existent. Ce sont des indications.
 - Le premier lancement télécharge la base de cartes (quelques Mo) et le modèle OCR (quelques Mo).

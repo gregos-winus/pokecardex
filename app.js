@@ -2,7 +2,7 @@ import { CardIndex, parseNumber, normalize } from './matcher.js';
 import { loadCards, loadSets, loadCard, cardImage, assetImage } from './tcgdex.js';
 import { readCard, getWorker } from './ocr.js';
 import {
-  CARD_W, CARD_H, makeCanvas, signature, remoteSignature, compareSignatures, detectCard, warpCard,
+  CARD_W, CARD_H, makeCanvas, signature, remoteSignature, compareSignatures, detectCard, warpCard, sharpness,
 } from './vision.js';
 
 const $ = sel => document.querySelector(sel);
@@ -39,7 +39,6 @@ const state = {
   photo: null, // { img, scale, tx, ty }
   busy: false,
   autoTimer: null,
-  lastTopId: null,
   visualAvailable: true,
   collection: store.get('pokescan.collection', []),
 };
@@ -176,7 +175,7 @@ function setMode(mode) {
   showPlaceholder(mode === 'none');
   $('#hint').textContent = mode === 'photo'
     ? 'Déplacez la photo (glisser) et zoomez (pincer ou molette) pour ajuster la carte au cadre, puis « Scanner ».'
-    : 'Placez la carte dans le cadre, bien à plat et éclairée : le nom en haut, le numéro en bas.';
+    : 'Tenez le téléphone à 15–20 cm, la carte dans le cadre, bien éclairée : le nom en haut, le numéro en bas.';
   layoutGuide();
 }
 
@@ -188,7 +187,9 @@ function showPlaceholder(show) {
 
 function guideRect() {
   const sw = els.stage.clientWidth, sh = els.stage.clientHeight;
-  let h = sh * 0.88, w = (h * 63) / 88;
+  // Cadre volontairement pas trop grand : pour le remplir, le téléphone reste à ~15 cm,
+  // distance à laquelle la plupart des appareils photo arrivent à faire la mise au point.
+  let h = sh * 0.78, w = (h * 63) / 88;
   if (w > sw * 0.9) { w = sw * 0.9; h = (w * 88) / 63; }
   return { x: (sw - w) / 2, y: (sh - h) / 2, w, h };
 }
@@ -222,14 +223,34 @@ function currentFrame() {
   return null;
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Caméra : garde l'image la plus nette parmi plusieurs images prises sur `duration` ms.
+ * Le tremblement de la main et la mise au point rendent beaucoup d'images floues ;
+ * l'appui sur « Scanner » fait lui-même bouger le téléphone.
+ */
+async function grabSharpFrame(duration = 450, samples = 6) {
+  if (state.mode !== 'camera') return currentFrame();
+  let best = null;
+  for (let i = 0; i < samples; i++) {
+    if (i) await sleep(duration / samples);
+    const cur = currentFrame();
+    if (!cur) break;
+    const r = clipRect(cur.guide, cur.frame);
+    cur.sharpness = r ? sharpness(cur.frame, r) : 0;
+    if (!best || cur.sharpness > best.sharpness) best = cur;
+  }
+  return best;
+}
+
 /**
  * Recadrages possibles de la carte visée, du plus probable au moins probable.
  * 1. carte détectée par ses bords puis redressée (perspective) ;
  * 2. simple contenu du cadre de visée ;
  * 3. (photo) image entière, si elle a déjà le format d'une carte.
  */
-function captureCandidates({ thorough = true } = {}) {
-  const cur = currentFrame();
+function captureCandidates(cur) {
   if (!cur) return [];
   const { frame, guide: g } = cur;
   const out = [];
@@ -243,8 +264,6 @@ function captureCandidates({ thorough = true } = {}) {
     if (found && quadArea(found.quad) > g.w * g.h * 0.3) quad = found.quad;
   }
   if (quad) out.push({ card: warpCard(frame, quad), detected: true });
-  if (!thorough && out.length) return out;
-
   out.push({ card: cropToCard(frame, g), detected: false });
   const ratio = frame.height / frame.width;
   if (state.mode === 'photo' && ratio > 1.2 && ratio < 1.6) {
@@ -391,26 +410,53 @@ function bindPhotoGestures() {
 
 // ---------------------------------------------------------------- reconnaissance
 
-async function scan({ silent = false } = {}) {
+// En scan automatique, chaque image n'essaie qu'une stratégie de lecture (pour rester rapide),
+// mais la stratégie change d'une image à l'autre et les indices s'accumulent (voir `tracker`).
+const LIVE_STRATEGIES = [
+  { crop: 0, passes: ['raw', 'adaptive'] },
+  { crop: 0, passes: ['tight', 'inverted'] },
+  { crop: 1, passes: ['raw', 'adaptive'] },
+  { crop: 0, passes: ['adaptive', 'below'] },
+];
+
+/**
+ * Lit la carte visée.
+ * - scan normal : image la plus nette, puis tous les recadrages et toutes les variantes d'OCR si besoin ;
+ * - `live` (scan automatique) : une seule stratégie, choisie par `attempt`, sans rien afficher.
+ */
+async function scan({ live = false, attempt = 0 } = {}) {
   if (state.busy) return null;
-  // Le scan automatique privilégie la vitesse ; le scan manuel essaie plusieurs cadrages
-  const crops = captureCandidates({ thorough: !silent });
-  if (!crops.length) return null;
+  state.scanCount = (state.scanCount ?? 0) + 1;
   state.busy = true;
   els.scan.disabled = true;
   els.stage.classList.add('scanning');
   try {
-    if (!silent) setStatus('Lecture de la carte…', 'busy');
+    if (!live) setStatus('Lecture de la carte…', 'busy');
+    const T = [performance.now()];
+    const cur = await grabSharpFrame(live ? 300 : 500, live ? 4 : 6);
+    T.push(performance.now());
+    let crops = captureCandidates(cur);
+    T.push(performance.now());
+    if (!crops.length) return null;
     const index = await ensureIndex();
     if (!index) return null;
 
+    let plans;
+    if (live) {
+      const st = LIVE_STRATEGIES[attempt % LIVE_STRATEGIES.length];
+      plans = [{ crop: crops[Math.min(st.crop, crops.length - 1)], passes: st.passes }];
+    } else {
+      plans = crops.map(crop => ({ crop, passes: undefined }));
+    }
+
     let best = null;
-    for (const crop of crops) {
+    for (const { crop, passes } of plans) {
       const reading = await readCard(crop.card, state.lang, {
         onProgress: ocrProgress,
         isGood: text => (index.matchNames(text)[0]?.sim ?? 0) >= 0.5,
-        hasNumber: text => !!parseNumber(text) || silent,
-        maxPasses: silent ? 2 : undefined,
+        hasNumber: text => !!parseNumber(text),
+        passes,
+        retryNumber: !live,
       });
       const number = parseNumber(reading.numberText);
       const cands = index.candidates({ nameText: reading.nameText, number });
@@ -420,25 +466,19 @@ async function scan({ silent = false } = {}) {
     }
     const { card, detected, reading, number } = best;
     let { cands } = best;
-    state.lastReading = { reading, number, detected, card };
+    T.push(performance.now());
+    state.lastReading = { reading, number, detected, card, timings: T.slice(1).map((t, i) => Math.round(t - T[i])) };
 
     if (!cands.length) {
-      if (!silent) setStatus('Aucune carte reconnue. Rapprochez-vous et évitez les reflets.', 'warn', 4000);
-      else setStatus('Recherche d\'une carte…', 'busy');
+      if (!live) setStatus('Aucune carte reconnue. Rapprochez-vous et évitez les reflets.', 'warn', 4000);
       return null;
     }
 
-    if (!silent) setStatus('Comparaison visuelle…', 'busy');
+    if (!live) setStatus('Comparaison visuelle…', 'busy');
     cands = await visualRerank(card, cands);
     const top = cands[0];
-    const confidence = confidenceOf(cands);
-    const result = { top, alternatives: cands.slice(1, 9), confidence, reading, number, card, detected };
-
-    if (!silent || confidence === 'high' || state.lastTopId === top.card.id) {
-      renderResult(result, top);
-      setStatus(confidence === 'high' ? `✓ ${top.card.name}` : `${top.card.name} ?`, confidence === 'high' ? 'ok' : 'warn', 2500);
-      navigator.vibrate?.(confidence === 'high' ? 60 : 20);
-    }
+    const result = { top, alternatives: cands.slice(1, 9), confidence: confidenceOf(cands), reading, number, card, detected, cands };
+    if (!live) showResult(result);
     return result;
   } catch (err) {
     console.error(err);
@@ -449,6 +489,13 @@ async function scan({ silent = false } = {}) {
     els.scan.disabled = state.mode === 'none';
     els.stage.classList.remove('scanning');
   }
+}
+
+function showResult(result) {
+  const { top, confidence } = result;
+  renderResult(result, top);
+  setStatus(confidence === 'high' ? `✓ ${top.card.name}` : `${top.card.name} ?`, confidence === 'high' ? 'ok' : 'warn', 2500);
+  navigator.vibrate?.(confidence === 'high' ? 60 : 20);
 }
 
 async function visualRerank(card, cands) {
@@ -481,22 +528,73 @@ function confidenceOf(cands) {
 
 // ---------------------------------------------------------------- scan automatique
 
+/**
+ * Accumule les indices de plusieurs images : chaque lecture vote pour ses meilleurs candidats,
+ * les votes anciens s'estompent (si l'on change de carte). Une lecture ratée ne remet pas tout à zéro.
+ */
+const tracker = {
+  votes: new Map(), // id → { cand, score, result, strong }
+  reset() { this.votes.clear(); },
+  add(result) {
+    for (const v of this.votes.values()) v.score *= 0.85;
+    if (!result) return;
+    result.cands.slice(0, 8).forEach((c, rank) => {
+      const v = this.votes.get(c.card.id) ?? { cand: c, score: 0, strong: false };
+      // Poids d'une lecture : nom (1 si bien lu ; moins pour un nom court ou approximatif),
+      // numéro et total du set, ressemblance visuelle avec l'image officielle
+      const w = c.nameSim + (c.numMatch ? 0.5 : 0) + (c.totalMatch ? 0.3 : 0) + 0.3 * (c.visual ?? 0);
+      v.score += w * (rank === 0 ? 1 : 0.8);
+      v.cand = c;
+      if (rank === 0) v.result = result;
+      v.strong ||= c.numMatch && c.totalMatch && c.nameSim >= 0.5;
+      this.votes.set(c.card.id, v);
+    });
+  },
+  ranking() {
+    return [...this.votes.values()].sort((a, b) => b.score - a.score);
+  },
+  /** Carte à retenir, ou null s'il faut encore des images. */
+  decision() {
+    const [a, ...rest] = this.ranking();
+    if (!a?.result) return null;
+    // Meilleur autre Pokémon (les autres éditions du même nom ne sont pas des concurrentes)
+    const b = rest.find(v => v.cand.card.norm !== a.cand.card.norm);
+    if (a.strong && a.score >= 1.2) return a; // nom + numéro + total lus sur une même image
+    if (a.score >= 1.2 && (!b || a.score >= 1.6 * b.score)) return a;
+    return null;
+  },
+};
+
 function startAuto() {
   stopAuto();
   if (state.mode !== 'camera') return;
   els.auto.checked = true;
-  state.lastTopId = null;
-  setStatus('Recherche d\'une carte…', 'busy');
+  tracker.reset();
+  setStatus('Recherche d\'une carte… tenez la carte immobile dans le cadre', 'busy');
+  let attempt = 0;
   const tick = async () => {
     if (!els.auto.checked || state.mode !== 'camera') return;
-    const res = await scan({ silent: true });
-    if (res && (res.confidence === 'high' || state.lastTopId === res.top.card.id)) {
+    const res = await scan({ live: true, attempt: attempt++ });
+    if (!els.auto.checked) return;
+    tracker.add(res);
+    const done = tracker.decision();
+    if (done) {
       els.auto.checked = false;
-      state.lastTopId = null;
+      const ranking = tracker.ranking();
+      const result = {
+        ...done.result,
+        top: done.cand,
+        alternatives: ranking.filter(v => v !== done).map(v => v.cand).slice(0, 8),
+        confidence: done.strong || done.score >= 2 ? 'high' : 'medium',
+      };
+      showResult(result);
       return;
     }
-    state.lastTopId = res?.top.card.id ?? null;
-    state.autoTimer = setTimeout(tick, 600);
+    const lead = tracker.ranking()[0];
+    if (lead && lead.score > 0.3) setStatus(`Lecture… ${lead.cand.card.name} ?`, 'busy');
+    else if (attempt >= 6) setStatus('Toujours rien : reculez un peu si l\'image est floue, évitez les reflets sur le nom', 'warn');
+    else setStatus('Recherche d\'une carte… tenez la carte immobile dans le cadre', 'busy');
+    state.autoTimer = setTimeout(tick, 150);
   };
   tick();
 }

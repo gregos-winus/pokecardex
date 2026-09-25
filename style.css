@@ -96,6 +96,7 @@ select, input[type="search"] {
   display: grid; gap: 20px;
   max-width: 1200px; margin: 0 auto; padding: 16px;
 }
+.layout > * { min-width: 0; } /* une liste défilante ne doit pas élargir la colonne */
 @media (min-width: 900px) {
   .layout { grid-template-columns: minmax(360px, 1fr) minmax(380px, 1fr); align-items: start; }
   .scanner { position: sticky; top: 72px; }
