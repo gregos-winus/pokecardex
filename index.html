@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#16161d">
+  <title>PokéScan</title>
+  <meta name="description" content="Reconnaissance de cartes Pokémon depuis la caméra">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+  <script src="app.js" type="module"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.svg" alt="" width="28" height="28">
+      <span>PokéScan</span>
+    </div>
+    <div class="topbar-actions">
+      <label class="lang">
+        <span class="sr-only">Langue des cartes</span>
+        <select id="lang" title="Langue des cartes">
+          <option value="fr">🇫🇷 FR</option>
+          <option value="en">🇬🇧 EN</option>
+          <option value="de">🇩🇪 DE</option>
+          <option value="es">🇪🇸 ES</option>
+          <option value="it">🇮🇹 IT</option>
+          <option value="pt">🇵🇹 PT</option>
+        </select>
+      </label>
+      <button id="openCollection" class="btn ghost" type="button">
+        <span aria-hidden="true">📚</span><span class="collection-label">Collection</span>
+        <span id="collectionCount" class="badge">0</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="scanner" aria-label="Scanner">
+      <div id="stage" class="stage">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="photo" class="photo" hidden></canvas>
+        <div id="guide" class="guide" aria-hidden="true">
+          <div class="zone zone-name"></div>
+          <div class="zone zone-number"></div>
+        </div>
+        <div id="placeholder" class="placeholder">
+          <p id="placeholderText">Autorisez l'accès à la caméra pour commencer,<br>ou importez une photo.</p>
+          <button id="startCamera" class="btn primary" type="button">Activer la caméra</button>
+        </div>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <div class="stage-tools">
+          <button id="torch" class="icon-btn" type="button" title="Lampe" hidden>🔦</button>
+          <button id="switchCamera" class="icon-btn" type="button" title="Changer de caméra" hidden>🔄</button>
+          <button id="backToCamera" class="icon-btn" type="button" title="Revenir à la caméra" hidden>🎥</button>
+        </div>
+      </div>
+      <p id="hint" class="hint">Placez la carte dans le cadre, bien à plat et éclairée : le nom en haut, le numéro en bas.</p>
+
+      <div class="controls">
+        <button id="scan" class="btn primary big" type="button" disabled>Scanner</button>
+        <label class="toggle" title="Analyse en continu jusqu'à reconnaître une carte">
+          <input id="auto" type="checkbox">
+          <span>Auto</span>
+        </label>
+        <label class="btn ghost file-btn">
+          📷 Photo
+          <input id="file" type="file" accept="image/*" capture="environment">
+        </label>
+      </div>
+
+      <form id="searchForm" class="search" autocomplete="off">
+        <input id="searchInput" type="search" placeholder="Ou cherchez par nom (ex : Dracaufeu)…" aria-label="Recherche manuelle">
+        <button class="btn ghost" type="submit">Chercher</button>
+      </form>
+    </section>
+
+    <section id="results" class="results" aria-label="Résultat" aria-live="polite">
+      <div class="empty">
+        <div class="empty-card"></div>
+        <p>Le résultat du scan s'affichera ici.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="collectionDialog" class="sheet">
+    <div class="sheet-head">
+      <h2>Ma collection</h2>
+      <div class="sheet-actions">
+        <button id="exportCsv" class="btn ghost" type="button">Exporter CSV</button>
+        <button id="closeCollection" class="icon-btn" type="button" title="Fermer">✕</button>
+      </div>
+    </div>
+    <p id="collectionSummary" class="muted"></p>
+    <ul id="collectionList" class="collection"></ul>
+  </dialog>
+
+  <template id="tplResult">
+    <article class="result">
+      <div class="result-main">
+        <a class="result-img" target="_blank" rel="noopener"><img alt=""></a>
+        <div class="result-info">
+          <span class="confidence"></span>
+          <h2 class="card-name"></h2>
+          <p class="card-set"><img class="set-logo" alt="" hidden><span></span></p>
+          <dl class="facts"></dl>
+          <div class="prices"></div>
+          <div class="result-actions">
+            <button class="btn primary add" type="button">+ Ajouter à ma collection</button>
+            <a class="btn ghost market" target="_blank" rel="noopener">Voir sur Cardmarket</a>
+          </div>
+        </div>
+      </div>
+      <div class="alternatives" hidden>
+        <h3>Autres possibilités</h3>
+        <ul class="alt-list"></ul>
+      </div>
+      <details class="debug">
+        <summary>Détails de la lecture</summary>
+        <div class="debug-body">
+          <canvas class="debug-crop"></canvas>
+          <pre class="debug-text"></pre>
+        </div>
+      </details>
+    </article>
+  </template>
+</body>
+</html>
