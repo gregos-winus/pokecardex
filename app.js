@@ -1,8 +1,8 @@
 import { CardIndex, parseNumber, normalize } from './matcher.js';
 import { loadCards, loadSets, loadCard, cardImage, assetImage } from './tcgdex.js';
-import { readCard, getWorker } from './ocr.js';
+import { readCard, getWorkers } from './ocr.js';
 import {
-  CARD_W, CARD_H, makeCanvas, signature, remoteSignature, compareSignatures, detectCard, warpCard, sharpness,
+  CARD_W, CARD_H, makeCanvas, signature, remoteSignature, compareSignatures, detectCard, sharpness, cardSampler,
 } from './vision.js';
 
 const $ = sel => document.querySelector(sel);
@@ -76,7 +76,7 @@ function loadIndex(lang) {
   state.indexPromise = p;
   // Préchargement de l'OCR en parallèle
   state.ocrStatus = 'chargement';
-  getWorker(lang, ocrProgress)
+  getWorkers(lang, ocrProgress)
     .then(() => { state.ocrStatus = 'prêt'; })
     .catch(err => { state.ocrStatus = `ERREUR : ${err.message}`; console.warn('OCR', err); });
   return p;
@@ -206,6 +206,16 @@ function layoutGuide() {
   if (state.mode === 'photo') drawPhoto();
 }
 
+/** Cadre de visée en coordonnées de la vidéo (la vidéo est affichée en object-fit: cover). */
+function videoGuide() {
+  const g = guideRect(), v = els.video;
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const ew = els.stage.clientWidth, eh = els.stage.clientHeight;
+  const s = Math.max(ew / vw, eh / vh);
+  const dx = (ew - vw * s) / 2, dy = (eh - vh * s) / 2;
+  return { x: (g.x - dx) / s, y: (g.y - dy) / s, w: g.w / s, h: g.h / s };
+}
+
 /**
  * Image source courante (trame vidéo ou photo) et position du cadre de visée dans cette image.
  */
@@ -213,14 +223,10 @@ function currentFrame() {
   const g = guideRect();
   if (state.mode === 'camera') {
     const v = els.video;
-    const vw = v.videoWidth, vh = v.videoHeight;
-    if (!vw || !vh) return null;
-    const frame = makeCanvas(vw, vh);
-    frame.getContext('2d').drawImage(v, 0, 0);
-    const ew = els.stage.clientWidth, eh = els.stage.clientHeight;
-    const s = Math.max(ew / vw, eh / vh); // object-fit: cover
-    const dx = (ew - vw * s) / 2, dy = (eh - vh * s) / 2;
-    return { frame, guide: { x: (g.x - dx) / s, y: (g.y - dy) / s, w: g.w / s, h: g.h / s } };
+    if (!v.videoWidth || !v.videoHeight) return null;
+    const frame = makeCanvas(v.videoWidth, v.videoHeight);
+    frame.getContext('2d', { willReadFrequently: true }).drawImage(v, 0, 0);
+    return { frame, guide: videoGuide() };
   }
   if (state.mode === 'photo') {
     const { img, scale, tx, ty } = state.photo;
@@ -238,28 +244,42 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  */
 async function grabSharpFrame(duration = 450, samples = 6) {
   if (state.mode !== 'camera') return currentFrame();
+  // La netteté est mesurée sur une vignette tirée directement de la vidéo ; l'image complète
+  // n'est copiée que lorsqu'elle est plus nette que la meilleure précédente.
   let best = null;
   for (let i = 0; i < samples; i++) {
     if (i) await sleep(duration / samples);
-    const cur = currentFrame();
-    if (!cur) break;
-    const r = clipRect(cur.guide, cur.frame);
-    cur.sharpness = r ? sharpness(cur.frame, r) : 0;
-    if (!best || cur.sharpness > best.sharpness) best = cur;
+    const v = els.video;
+    if (!v.videoWidth) break;
+    const g = videoGuide();
+    const r = clipRect(g, { width: v.videoWidth, height: v.videoHeight });
+    const sh = r ? sharpness(v, r) : 0;
+    if (!best || sh > best.sharpness) {
+      best = currentFrame();
+      if (!best) break;
+      best.sharpness = sh;
+    }
   }
   return best;
 }
 
 /**
  * Recadrages possibles de la carte visée, du plus probable au moins probable.
- * 1. carte détectée par ses bords puis redressée (perspective) ;
+ * 1. carte détectée par ses bords (perspective corrigée) ;
  * 2. simple contenu du cadre de visée ;
  * 3. (photo) image entière, si elle a déjà le format d'une carte.
+ * Chaque recadrage fournit la carte redressée (`card`) et un `sampler` qui relit le nom et le numéro
+ * directement dans l'image source, à pleine résolution.
  */
 function captureCandidates(cur) {
   if (!cur) return [];
   const { frame, guide: g } = cur;
   const out = [];
+  const rectQuad = r => [{ x: r.x, y: r.y }, { x: r.x + r.w, y: r.y }, { x: r.x + r.w, y: r.y + r.h }, { x: r.x, y: r.y + r.h }];
+  const add = (quad, detected, pad) => {
+    const sampler = cardSampler(frame, quad, pad);
+    out.push({ sampler, detected, get card() { return sampler.card; } });
+  };
 
   // En mode photo, les coins trouvés à l'ouverture restent valables tant que la photo n'a pas bougé
   let quad = state.mode === 'photo' ? state.photo.quad : null;
@@ -269,22 +289,10 @@ function captureCandidates(cur) {
     const found = region && detectCard(frame, region);
     if (found && quadArea(found.quad) > g.w * g.h * 0.3) quad = found.quad;
   }
-  if (quad) out.push({ card: warpCard(frame, quad), detected: true });
-  out.push({ card: cropToCard(frame, g), detected: false });
+  if (quad) add(quad, true);
+  add(rectQuad(g), false, 0);
   const ratio = frame.height / frame.width;
-  if (state.mode === 'photo' && ratio > 1.2 && ratio < 1.6) {
-    out.push({ card: cropToCard(frame, { x: 0, y: 0, w: frame.width, h: frame.height }), detected: false });
-  }
-  return out;
-}
-
-function cropToCard(frame, r) {
-  const out = makeCanvas(CARD_W, CARD_H);
-  const ctx = out.getContext('2d', { willReadFrequently: true });
-  ctx.fillStyle = '#808080';
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(frame, r.x, r.y, r.w, r.h, 0, 0, CARD_W, CARD_H);
+  if (state.mode === 'photo' && ratio > 1.2 && ratio < 1.6) add(rectQuad({ x: 0, y: 0, w: frame.width, h: frame.height }), false, 0);
   return out;
 }
 
@@ -419,10 +427,12 @@ function bindPhotoGestures() {
 // En scan automatique, chaque image n'essaie qu'une stratégie de lecture (pour rester rapide),
 // mais la stratégie change d'une image à l'autre et les indices s'accumulent (voir `tracker`).
 const LIVE_STRATEGIES = [
-  { crop: 0, passes: ['raw', 'adaptive'] },
-  { crop: 0, passes: ['tight', 'inverted'] },
-  { crop: 1, passes: ['raw', 'adaptive'] },
-  { crop: 0, passes: ['adaptive', 'below'] },
+  { crop: 0, passes: ['raw'] },
+  { crop: 0, passes: ['adaptive'] },
+  { crop: 1, passes: ['raw'] },
+  { crop: 0, passes: ['tight'] },
+  { crop: 0, passes: ['inverted'] },
+  { crop: 0, passes: ['below'] },
 ];
 
 /**
@@ -457,7 +467,7 @@ async function scan({ live = false, attempt = 0 } = {}) {
 
     let best = null;
     for (const { crop, passes } of plans) {
-      const reading = await readCard(crop.card, state.lang, {
+      const reading = await readCard(crop.sampler, state.lang, {
         onProgress: ocrProgress,
         isGood: text => (index.matchNames(text)[0]?.sim ?? 0) >= 0.5,
         hasNumber: text => !!parseNumber(text),
@@ -618,8 +628,9 @@ const tracker = {
     if (!a?.result) return null;
     // Meilleur autre Pokémon (les autres éditions du même nom ne sont pas des concurrentes)
     const b = rest.find(v => v.cand.card.norm !== a.cand.card.norm);
-    if (a.strong && a.score >= 1.2) return a; // nom + numéro + total lus sur une même image
-    if (a.score >= 1.2 && (!b || a.score >= 1.6 * b.score)) return a;
+    if (a.strong && a.score >= 1.1) return a; // nom + numéro + total lus sur une même image
+    // Nom lu (≈1) et confirmé par l'illustration ou par une 2e lecture
+    if (a.score >= 1.1 && (!b || a.score >= 1.6 * b.score)) return a;
     return null;
   },
 };

@@ -12,6 +12,9 @@ Tout s'exécute dans le navigateur : pas de serveur, pas de clé d'API.
    Elle redresse ensuite la perspective. Une carte posée de biais ou photographiée en angle est donc lue correctement.
    En mode photo, la carte est trouvée automatiquement dans l'image. Si les bords ne sont pas trouvés, on prend le contenu du cadre.
 2. **Lecture (OCR)** : [Tesseract.js](https://tesseract.projectnaptha.com/) lit le **nom** (en haut) et le **numéro** (en bas, ex. `025/198`).
+   Ces deux zones sont découpées directement dans l'image de la caméra, à pleine résolution et avec la perspective
+   corrigée : le petit numéro reste lisible. Deux lecteurs OCR travaillent en parallèle, l'un sur le nom, l'autre
+   sur le numéro.
    Si le nom n'est pas trouvé, la lecture est relancée avec d'autres réglages : image brute, puis texte clair sur fond sombre.
    Si c'est encore insuffisant, on essaie un autre cadrage.
 3. **Rapprochement** : le texte lu est comparé à toute la base [TCGdex](https://tcgdex.dev) (FR, EN, DE, ES, IT, PT).
@@ -60,6 +63,9 @@ Sur le téléphone, on peut ensuite choisir « Ajouter à l'écran d'accueil » 
 - Choisir la bonne **langue** en haut à droite (celle de la carte).
 - Le mode **Auto** analyse en continu jusqu'à trouver la carte.
 - « Détails de la lecture » montre ce que l'OCR a lu, ce qui aide si la carte n'est pas reconnue.
+- Le panneau **🩺 Diagnostic**, sous la recherche, montre en direct la résolution de la caméra, l'état de la base et
+  de l'OCR, puis, pour chaque scan, la durée, la netteté, le cadrage et le texte lu.
+  « Copier le rapport » permet de le transmettre pour signaler un problème.
 - En cas d'échec, la recherche par nom reste disponible.
 
 ## Fichiers
@@ -76,8 +82,9 @@ Sur le téléphone, on peut ensuite choisir « Ajouter à l'écran d'accueil » 
 ## Limites
 
 - Les cartes japonaises et coréennes ne sont pas prises en charge.
-- Les suffixes stylisés (EX, GX, V, VMAX…) sont souvent mal lus. Sans le numéro, l'édition trouvée peut être
-  la version sans suffixe du même Pokémon : choisissez la bonne carte dans « Autres possibilités ».
+- Les suffixes stylisés (EX, GX, V, VMAX…) sont des logos que l'OCR lit rarement. Si le numéro est lu, la bonne
+  carte est quand même trouvée. Sinon, c'est la version sans suffixe qui s'affiche : choisissez la bonne carte dans
+  « Autres possibilités ».
 - Les numéros spéciaux (`TG05/TG30`, `SWSH050`…) ne sont pas lus. La carte est alors trouvée par son nom et son illustration.
 - Les prix viennent de TCGdex quand ils existent. Ce sont des indications.
 - Le premier lancement télécharge la base de cartes (quelques Mo) et le modèle OCR (quelques Mo).

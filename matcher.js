@@ -96,6 +96,8 @@ export function parseNumber(ocrText) {
   return found[0] ?? null;
 }
 
+const SUFFIXES = new Set(['ex', 'gx', 'v', 'vmax', 'vstar', 'break', 'prime', 'legend', 'lv', 'x', 'star']);
+
 // Sets de Pokémon TCG Pocket (jeu mobile) : aucune carte physique
 const POCKET_SET = /^(?:[AB]\d+[a-z]?|P-[AB])$/;
 
@@ -119,11 +121,19 @@ export class CardIndex {
       if (!this.byName.has(c.norm)) this.byName.set(c.norm, []);
       this.byName.get(c.norm).push(c);
     }
-    this.names = [...this.byName.keys()].map(n => ({
-      norm: n,
-      compact: n.replace(/ /g, ''),
-      words: n.split(' ').length,
-    }));
+    this.names = [...this.byName.keys()].map(n => {
+      const words = n.split(' ');
+      // Suffixes imprimés sous forme de logo (EX, GX, V, VMAX…) : souvent illisibles pour l'OCR
+      let k = words.length;
+      while (k > 1 && SUFFIXES.has(words[k - 1])) k--;
+      const base = k < words.length ? words.slice(0, k) : null;
+      return {
+        norm: n,
+        compact: n.replace(/ /g, ''),
+        words: words.length,
+        base: base && { compact: base.join(''), words: base.length },
+      };
+    });
     this.byId = new Map(this.cards.map(c => [c.id, c]));
   }
 
@@ -137,8 +147,12 @@ export class CardIndex {
     const out = [];
     for (const n of this.names) {
       const m = nameMatch(n.compact, n.words, tokens);
-      if (m.sim < 0.6) continue;
-      const score = nameScore(n.compact, m);
+      let score = m.sim >= 0.6 ? nameScore(n.compact, m) : 0;
+      if (n.base) {
+        // « Mewtwo EX » lu « Mewtwo » : on compare aussi le nom sans son suffixe (légère pénalité)
+        const mb = nameMatch(n.base.compact, n.base.words, tokens);
+        if (mb.sim >= 0.6) score = Math.max(score, 0.9 * nameScore(n.base.compact, mb));
+      }
       if (score >= 0.45) out.push({ norm: n.norm, sim: score });
     }
     // À similarité égale, on préfère le nom le plus long (« Pikachu V » plutôt que « Pikachu »)
@@ -153,14 +167,14 @@ export class CardIndex {
   candidates(reading) {
     const names = this.matchNames(reading.nameText);
     const bestSim = names[0]?.sim ?? 0;
-    const nameSims = new Map();
-    for (const n of names) {
-      if (n.sim >= Math.max(0.5, bestSim - 0.12)) nameSims.set(n.norm, n.sim);
-    }
+    // Similarité de tous les noms plausibles (pour noter les cartes trouvées par leur numéro)…
+    const nameSims = new Map(names.map(n => [n.norm, n.sim]));
 
+    // … mais seuls les meilleurs noms amènent toutes leurs cartes dans la sélection
     const pool = new Map();
-    for (const norm of nameSims.keys()) {
-      for (const c of this.byName.get(norm)) pool.set(c.id, c);
+    for (const n of names) {
+      if (n.sim < Math.max(0.5, bestSim - 0.12)) continue;
+      for (const c of this.byName.get(n.norm)) pool.set(c.id, c);
     }
     const num = reading.number;
     if (num) {
@@ -180,7 +194,9 @@ export class CardIndex {
         (set.cardCount?.official === num.total || set.cardCount?.total === num.total);
       // Un nom à moitié lu compte peu (carré) ; numéro + total ensemble désignent presque une carte unique
       // Un nom à moitié lu compte peu (carré) : numéro + total bien lus doivent pouvoir l'emporter
-      const score = 0.55 * nameSim * nameSim + 0.3 * (numMatch ? 1 : 0) + 0.15 * (totalMatch ? 1 : 0);
+      // numéro ET total du même set : quasi-signature d'une carte précise (bonus)
+      const score = 0.55 * nameSim * nameSim + 0.3 * (numMatch ? 1 : 0) + 0.15 * (totalMatch ? 1 : 0) +
+        (numMatch && totalMatch ? 0.15 : 0);
       scored.push({ card: c, set, score, nameSim, numMatch, totalMatch, order: set?.order ?? 0 });
     }
     // Score, puis longueur du nom, puis les sets les plus récents d'abord

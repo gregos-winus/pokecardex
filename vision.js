@@ -9,6 +9,9 @@ export const ZONES = {
   number: { x: 0.0, y: 0.865, w: 1.0, h: 0.125 },
   nameBelow: { x: 0.02, y: 0.12, w: 0.75, h: 0.12 },
   nameTight: { x: 0.03, y: 0.02, w: 0.62, h: 0.09 },
+  // Numéro : en bas à gauche (cartes récentes) ou en bas à droite (anciennes)
+  numberLeft: { x: 0.0, y: 0.9, w: 0.46, h: 0.09 },
+  numberRight: { x: 0.54, y: 0.9, w: 0.46, h: 0.09 },
 };
 
 let sharpCanvas = null;
@@ -47,15 +50,19 @@ function ctx2d(canvas) {
   return canvas.getContext('2d', { willReadFrequently: true });
 }
 
-/** Extrait une zone de la carte normalisée, agrandie, en niveaux de gris contrastés. */
-export function extractZone(card, zone, scale = 2, invert = false) {
-  const sx = zone.x * card.width, sy = zone.y * card.height;
-  const sw = zone.w * card.width, sh = zone.h * card.height;
-  const out = makeCanvas(sw * scale, sh * scale);
+/** Copie d'une zone de la carte normalisée, agrandie (couleur brute). */
+export function rawZone(card, zone, scale = 2) {
+  const out = makeCanvas(card.width * zone.w * scale, card.height * zone.h * scale);
   const ctx = ctx2d(out);
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(card, sx, sy, sw, sh, 0, 0, out.width, out.height);
-  const img = ctx.getImageData(0, 0, out.width, out.height);
+  ctx.drawImage(card, zone.x * card.width, zone.y * card.height, zone.w * card.width, zone.h * card.height, 0, 0, out.width, out.height);
+  return out;
+}
+
+/** Niveaux de gris avec étirement du contraste (percentiles 2–98), éventuellement inversés. Modifie `canvas`. */
+export function enhance(canvas, invert = false) {
+  const ctx = ctx2d(canvas);
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = img.data;
   const hist = new Uint32Array(256);
   const gray = new Uint8ClampedArray(d.length / 4);
@@ -64,7 +71,6 @@ export function extractZone(card, zone, scale = 2, invert = false) {
     gray[p] = g;
     hist[g]++;
   }
-  // Étirement du contraste entre les percentiles 2 et 98
   const total = gray.length;
   let lo = 0, hi = 255, acc = 0;
   for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.02) { lo = v; break; } }
@@ -78,7 +84,12 @@ export function extractZone(card, zone, scale = 2, invert = false) {
     d[i + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
-  return out;
+  return canvas;
+}
+
+/** Extrait une zone de la carte normalisée, agrandie, en niveaux de gris contrastés. */
+export function extractZone(card, zone, scale = 2, invert = false) {
+  return enhance(rawZone(card, zone, scale), invert);
 }
 
 /**
@@ -428,6 +439,68 @@ function homography(w, h, q) {
     }
   }
   return b.map((v, i) => v / A[i][i]);
+}
+
+/**
+ * Prépare la lecture d'une carte délimitée par `quad` dans `source` (trame caméra ou photo).
+ * - `card` : la carte redressée en 630×880 (affichage, comparaison visuelle) ;
+ * - `zone(z, scale)` : une zone (coordonnées relatives à la carte) rééchantillonnée DIRECTEMENT
+ *   depuis l'image source. Le petit numéro garde ainsi tout le détail de la caméra au lieu
+ *   d'être agrandi depuis la version 630×880.
+ */
+export function cardSampler(source, quad, pad = 0.025) {
+  const H0 = homography(1, 1, quad);
+  const map = (x, y) => { const z = H0[6] * x + H0[7] * y + 1; return { x: (H0[0] * x + H0[1] * y + H0[2]) / z, y: (H0[3] * x + H0[4] * y + H0[5]) / z }; };
+  const padded = pad ? [map(-pad, -pad), map(1 + pad, -pad), map(1 + pad, 1 + pad), map(-pad, 1 + pad)] : quad;
+  const H = homography(1, 1, padded);
+  const sctx = ctx2d(source);
+  let card = null;
+  return {
+    // redressée à la demande : en scan automatique, un seul des recadrages est réellement lu
+    get card() { return (card ??= warpCard(source, quad, pad)); },
+    zone(z, scale = 2) {
+      const outW = Math.max(8, Math.round(CARD_W * z.w * scale)), outH = Math.max(8, Math.round(CARD_H * z.h * scale));
+      const pts = [[z.x, z.y], [z.x + z.w, z.y], [z.x + z.w, z.y + z.h], [z.x, z.y + z.h]].map(([u, v]) => {
+        const w = H[6] * u + H[7] * v + 1;
+        return { x: (H[0] * u + H[1] * v + H[2]) / w, y: (H[3] * u + H[4] * v + H[5]) / w };
+      });
+      const bx = Math.max(0, Math.floor(Math.min(...pts.map(p => p.x))) - 2);
+      const by = Math.max(0, Math.floor(Math.min(...pts.map(p => p.y))) - 2);
+      const bw = Math.min(source.width, Math.ceil(Math.max(...pts.map(p => p.x))) + 2) - bx;
+      const bh = Math.min(source.height, Math.ceil(Math.max(...pts.map(p => p.y))) + 2) - by;
+      const out = makeCanvas(outW, outH);
+      const octx = ctx2d(out);
+      const img = octx.createImageData(outW, outH);
+      const d = img.data;
+      d.fill(128);
+      if (bw >= 2 && bh >= 2) {
+        const src = sctx.getImageData(bx, by, bw, bh).data;
+        for (let y = 0; y < outH; y++) {
+          const v = z.y + ((y + 0.5) / outH) * z.h;
+          for (let x = 0; x < outW; x++) {
+            const u = z.x + ((x + 0.5) / outW) * z.w;
+            const w = H[6] * u + H[7] * v + 1;
+            const sx = (H[0] * u + H[1] * v + H[2]) / w - bx, sy = (H[3] * u + H[4] * v + H[5]) / w - by;
+            const x0 = Math.floor(sx), y0 = Math.floor(sy);
+            if (x0 < 0 || y0 < 0 || x0 >= bw - 1 || y0 >= bh - 1) continue;
+            const fx = sx - x0, fy = sy - y0, o = (y * outW + x) * 4;
+            const i00 = (y0 * bw + x0) * 4, i10 = i00 + 4, i01 = i00 + bw * 4, i11 = i01 + 4;
+            for (let ch = 0; ch < 3; ch++) {
+              d[o + ch] = (src[i00 + ch] * (1 - fx) + src[i10 + ch] * fx) * (1 - fy) + (src[i01 + ch] * (1 - fx) + src[i11 + ch] * fx) * fy;
+            }
+          }
+        }
+      }
+      for (let i = 3; i < d.length; i += 4) d[i] = 255;
+      octx.putImageData(img, 0, 0);
+      return out;
+    },
+  };
+}
+
+/** Même interface que `cardSampler`, pour une carte déjà redressée (630×880). */
+export function canvasSampler(card) {
+  return { card, zone: (z, scale = 2) => rawZone(card, z, scale) };
 }
 
 /**

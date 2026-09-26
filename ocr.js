@@ -1,30 +1,34 @@
 // Lecture du nom et du numéro d'une carte avec Tesseract.js (exécuté dans le navigateur).
-import { ZONES, extractZone, adaptiveThreshold } from './vision.js';
+import { ZONES, enhance, adaptiveThreshold, makeCanvas } from './vision.js';
+import { normalize, levenshtein } from './matcher.js';
 
 const TESS_LANG = { fr: 'fra', en: 'eng', de: 'deu', es: 'spa', it: 'ita', pt: 'por' };
 
-let worker = null;
-let workerLang = null;
+// Deux lecteurs OCR : le nom et le numéro sont lus en parallèle (téléphones multicœurs).
+// Une seule langue par lecteur : ajouter l'anglais doublait le temps de lecture sans gain mesuré.
+let workers = null;
+let workersLang = null;
 let pending = null;
 
-export async function getWorker(lang, onProgress) {
+export async function getWorkers(lang, onProgress) {
   const tl = TESS_LANG[lang] ?? 'eng';
-  if (worker && workerLang === tl) return worker;
+  if (workers && workersLang === tl) return workers;
   if (pending) await pending.catch(() => {});
-  if (worker && workerLang === tl) return worker;
-  if (worker) { await worker.terminate(); worker = null; }
+  if (workers && workersLang === tl) return workers;
+  if (workers) { await Promise.all(workers.map(w => w.terminate())); workers = null; }
   if (!window.Tesseract) throw new Error('Tesseract.js n\'a pas pu être chargé (vérifiez la connexion).');
   pending = (async () => {
-    // Le nom est souvent en français ET le numéro/les codes en caractères latins simples :
-    // la langue anglaise en complément améliore la lecture des suffixes (V, VMAX, ex, GX).
-    const langs = tl === 'eng' ? 'eng' : `${tl}+eng`;
-    const w = await window.Tesseract.createWorker(langs, 1, {
-      logger: m => onProgress?.(m),
-    });
-    await w.setParameters({ user_defined_dpi: '300', preserve_interword_spaces: '1' });
-    worker = w;
-    workerLang = tl;
-    return w;
+    const make = async log => {
+      const w = await window.Tesseract.createWorker(tl, 1, { logger: log ? m => onProgress?.(m) : undefined });
+      await w.setParameters({ user_defined_dpi: '300', preserve_interword_spaces: '1' });
+      return w;
+    };
+    // Le premier télécharge le modèle ; le second le reprend du cache du navigateur
+    const first = await make(true);
+    const second = await make(false);
+    workers = [first, second];
+    workersLang = tl;
+    return workers;
   })();
   try { return await pending; } finally { pending = null; }
 }
@@ -32,53 +36,71 @@ export async function getWorker(lang, onProgress) {
 async function recognize(w, canvas, psm) {
   await w.setParameters({ tessedit_pageseg_mode: String(psm) });
   const { data } = await w.recognize(canvas);
-  return { text: (data.text || '').replace(/\s+/g, ' ').trim(), confidence: data.confidence ?? 0 };
+  return (data.text || '').replace(/\s+/g, ' ').trim();
 }
 
-// Copie brute (couleur, sans retouche) d'une zone : sert de 2e essai à l'OCR
-function rawZone(card, zone, scale) {
-  const out = document.createElement('canvas');
-  out.width = Math.round(card.width * zone.w * scale);
-  out.height = Math.round(card.height * zone.h * scale);
-  const ctx = out.getContext('2d');
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(card, zone.x * card.width, zone.y * card.height, zone.w * card.width, zone.h * card.height, 0, 0, out.width, out.height);
-  return out;
-}
+const NAME_SCALE = 1.5; // ×2 n'apportait rien de mesurable et coûtait ~30 % de temps
 
-// Variantes de lecture du nom, dans l'ordre de rentabilité mesuré sur 66 vraies photos
+// Variantes de lecture du nom, dans l'ordre de rentabilité mesuré sur 66 vraies photos.
+// `s` est une source de zones (voir cardSampler / canvasSampler dans vision.js).
 export const NAME_PASSES = {
-  raw: card => [rawZone(card, ZONES.name, 2), 11], // couleur brute
-  adaptive: card => [adaptiveThreshold(extractZone(card, ZONES.name, 2)), 6], // binarisation locale
-  tight: card => [extractZone(card, ZONES.nameTight, 3), 11], // nom seul, sans les PV
-  inverted: card => [extractZone(card, ZONES.name, 2, true), 11], // texte clair sur fond sombre
-  below: card => [extractZone(card, ZONES.nameBelow, 2), 11], // nom sous un bandeau (anciennes cartes Dresseur)
+  raw: s => [s.zone(ZONES.name, NAME_SCALE), 11], // couleur brute
+  adaptive: s => [adaptiveThreshold(enhance(s.zone(ZONES.name, NAME_SCALE))), 6], // binarisation locale
+  tight: s => [enhance(s.zone(ZONES.nameTight, 2)), 11], // nom seul, sans les PV
+  inverted: s => [enhance(s.zone(ZONES.name, NAME_SCALE), true), 11], // texte clair sur fond sombre
+  below: s => [enhance(s.zone(ZONES.nameBelow, NAME_SCALE)), 11], // nom sous un bandeau (anciennes cartes Dresseur)
 };
 const ALL_PASSES = ['raw', 'adaptive', 'tight', 'inverted', 'below'];
 
-// Bandeau « TRAINER » des anciennes cartes Dresseur : le nom est juste en dessous
-const BANNER = /tra[il1]n[eo]r|dresseur|entrenador|allenatore|treinador/i;
+// Bandeau « TRAINER » des anciennes cartes Dresseur : le nom est juste en dessous.
+// Tolérant aux erreurs de lecture (« TOOINEDR », « 1RIINGR »…).
+const BANNER_WORDS = ['trainer', 'dresseur', 'entrenador', 'allenatore', 'treinador'];
+const hasBanner = text => normalize(text).split(' ').some(t =>
+  t.length >= 5 && BANNER_WORDS.some(b => Math.abs(t.length - b.length) <= 2 && levenshtein(t, b) <= 3));
 
-/**
- * Lit les zones de texte d'une carte déjà recadrée (630×880).
- * Le nom est relu avec les variantes `passes` (dans l'ordre) tant que `isGood(texteCumulé)` est faux.
- */
-export async function readCard(card, lang, { onProgress, isGood, hasNumber, passes = ALL_PASSES, retryNumber = true } = {}) {
-  const w = await getWorker(lang, onProgress);
+/** Les deux coins du bas (numéro à gauche ou à droite selon l'époque), empilés en une seule image. */
+function numberImage(s) {
+  const left = enhance(s.zone(ZONES.numberLeft, 2.5));
+  const right = enhance(s.zone(ZONES.numberRight, 2.5));
+  const gap = 16;
+  const out = makeCanvas(Math.max(left.width, right.width), left.height + right.height + gap);
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(left, 0, 0);
+  ctx.drawImage(right, 0, left.height + gap);
+  return out;
+}
+
+async function readName(w, s, passes, isGood) {
   const texts = [];
   let nameCanvas = null;
   const queue = [...passes];
   while (queue.length) {
     const name = queue.shift();
-    const [canvas, psm] = NAME_PASSES[name](card);
+    const [canvas, psm] = NAME_PASSES[name](s);
     nameCanvas ??= canvas;
-    const text = (await recognize(w, canvas, psm)).text;
+    const text = await recognize(w, canvas, psm);
     texts.push(text);
     if (isGood?.(texts.join(' | '))) break;
-    if (BANNER.test(text) && !passes.includes('below') && !queue.includes('below')) queue.unshift('below');
+    if (hasBanner(text) && !passes.includes('below') && !queue.includes('below')) queue.unshift('below');
   }
-  const numberCanvas = extractZone(card, ZONES.number, 3);
-  let numberText = (await recognize(w, numberCanvas, 11)).text;
-  if (retryNumber && !hasNumber?.(numberText)) numberText += ' | ' + (await recognize(w, rawZone(card, ZONES.number, 3), 11)).text;
-  return { nameText: texts.join(' | '), numberText, nameCanvas, numberCanvas, passes: texts.length };
+  return { nameText: texts.join(' | '), nameCanvas, passes: texts.length };
+}
+
+/**
+ * Lit le nom et le numéro d'une carte.
+ * @param s source de zones (cardSampler ou canvasSampler)
+ * Le nom est relu avec les variantes `passes` (dans l'ordre) tant que `isGood(texteCumulé)` est faux.
+ */
+export async function readCard(s, lang, { onProgress, isGood, hasNumber, passes = ALL_PASSES, retryNumber = true } = {}) {
+  const [w1, w2] = await getWorkers(lang, onProgress);
+  const numberCanvas = numberImage(s);
+  const readNumber = async () => {
+    let text = await recognize(w2, numberCanvas, 6);
+    if (retryNumber && !hasNumber?.(text)) text += ' | ' + await recognize(w2, numberCanvas, 11);
+    return text;
+  };
+  const [name, numberText] = await Promise.all([readName(w1, s, passes, isGood), readNumber()]);
+  return { ...name, numberText, numberCanvas };
 }
