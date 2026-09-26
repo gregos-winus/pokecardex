@@ -19,7 +19,7 @@ export async function getWorkers(lang, onProgress) {
   if (!window.Tesseract) throw new Error('Tesseract.js n\'a pas pu être chargé (vérifiez la connexion).');
   pending = (async () => {
     const make = async log => {
-      const w = await window.Tesseract.createWorker(tl, 1, { logger: log ? m => onProgress?.(m) : undefined });
+      const w = await window.Tesseract.createWorker(tl, 1, log ? { logger: m => onProgress?.(m) } : {});
       await w.setParameters({ user_defined_dpi: '300', preserve_interword_spaces: '1' });
       return w;
     };
@@ -98,7 +98,8 @@ export async function readCard(s, lang, { onProgress, isGood, hasNumber, passes 
   const numberCanvas = numberImage(s);
   const readNumber = async () => {
     let text = await recognize(w2, numberCanvas, 6);
-    if (retryNumber && !hasNumber?.(text)) text += ' | ' + await recognize(w2, numberCanvas, 11);
+    // Scan manuel / photo : si besoin, bande complète du bas (plus lente, parfois meilleure sur photo)
+    if (retryNumber && !hasNumber?.(text)) text += ' | ' + await recognize(w2, enhance(s.zone(ZONES.number, 3)), 11);
     return text;
   };
   const [name, numberText] = await Promise.all([readName(w1, s, passes, isGood), readNumber()]);
