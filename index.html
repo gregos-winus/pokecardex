@@ -75,6 +75,15 @@
         <input id="searchInput" type="search" placeholder="Ou cherchez par nom (ex : Dracaufeu)…" aria-label="Recherche manuelle">
         <button class="btn ghost" type="submit">Chercher</button>
       </form>
+      <details id="diag" class="diag">
+        <summary>🩺 Diagnostic (pour signaler un problème)</summary>
+        <p class="muted">Lancez un scan, puis copiez ce rapport et envoyez-le avec une capture d'écran.</p>
+        <div class="diag-body">
+          <canvas id="diagCrop" width="126" height="176" title="Dernière image analysée"></canvas>
+          <pre id="diagText">…</pre>
+        </div>
+        <button id="diagCopy" class="btn ghost" type="button">Copier le rapport</button>
+      </details>
     </section>
 
     <section id="results" class="results" aria-label="Résultat" aria-live="polite">

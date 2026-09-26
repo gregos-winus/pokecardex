@@ -258,3 +258,14 @@ select, input[type="search"] {
   background: var(--surface); color: var(--text); font-size: 16px; cursor: pointer;
 }
 .qty span { min-width: 18px; text-align: center; font-weight: 700; }
+
+/* ------------------------------------------------ diagnostic */
+.diag { margin-top: 14px; font-size: 13px; }
+.diag summary { cursor: pointer; color: var(--muted); }
+.diag p { margin: 8px 0; }
+.diag-body { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+.diag canvas { width: 84px; height: auto; border-radius: 4px; background: var(--surface-2); flex: none; }
+.diag pre {
+  flex: 1; min-width: 0; margin: 0; padding: 8px; border-radius: 8px; background: var(--surface-2);
+  font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 50vh; overflow: auto;
+}

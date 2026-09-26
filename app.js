@@ -16,6 +16,7 @@ const els = {
   collectionDialog: $('#collectionDialog'), closeCollection: $('#closeCollection'),
   collectionList: $('#collectionList'), collectionSummary: $('#collectionSummary'), exportCsv: $('#exportCsv'),
   tplResult: $('#tplResult'),
+  diag: $('#diag'), diagText: $('#diagText'), diagCrop: $('#diagCrop'), diagCopy: $('#diagCopy'),
 };
 
 const store = {
@@ -68,16 +69,21 @@ function loadIndex(lang) {
     })
     .catch(err => {
       console.error(err);
+      state.indexError = err.message;
       setStatus('Impossible de charger la base TCGdex. Vérifiez votre connexion.', 'error');
       throw err;
     });
   state.indexPromise = p;
   // Préchargement de l'OCR en parallèle
-  getWorker(lang, ocrProgress).catch(err => console.warn('OCR', err));
+  state.ocrStatus = 'chargement';
+  getWorker(lang, ocrProgress)
+    .then(() => { state.ocrStatus = 'prêt'; })
+    .catch(err => { state.ocrStatus = `ERREUR : ${err.message}`; console.warn('OCR', err); });
   return p;
 }
 
 function ocrProgress(m) {
+  state.ocrStatus = `${m.status} ${Math.round((m.progress || 0) * 100)} %`;
   if (!state.busy && m.status && m.status.includes('loading') && m.progress < 1) {
     setStatus(`Préparation de l'OCR… ${Math.round((m.progress || 0) * 100)} %`, 'busy');
   }
@@ -468,6 +474,7 @@ async function scan({ live = false, attempt = 0 } = {}) {
     let { cands } = best;
     T.push(performance.now());
     state.lastReading = { reading, number, detected, card, timings: T.slice(1).map((t, i) => Math.round(t - T[i])) };
+    logScan({ live, cur, best, T });
 
     if (!cands.length) {
       if (!live) setStatus('Aucune carte reconnue. Rapprochez-vous et évitez les reflets.', 'warn', 4000);
@@ -526,6 +533,58 @@ function confidenceOf(cands) {
   return 'low';
 }
 
+// ---------------------------------------------------------------- diagnostic
+
+const scanLog = [];
+
+function logScan({ live, cur, best, T }) {
+  const ms = T.slice(1).map((t, i) => Math.round(t - T[i]));
+  scanLog.unshift({
+    at: new Date().toLocaleTimeString('fr-FR'),
+    mode: live ? 'auto' : 'manuel',
+    ms: `${Math.round(T.at(-1) - T[0])} ms (image ${ms[0]}, cadrage ${ms[1]}, OCR ${ms[2]})`,
+    sharp: Math.round(cur?.sharpness ?? -1),
+    detected: best.detected,
+    name: best.reading.nameText.slice(0, 120),
+    num: best.reading.numberText.slice(0, 80),
+    number: best.number ? `${best.number.number}/${best.number.total}` : '—',
+    top: best.cands.slice(0, 3).map(c => `${c.card.name} ${c.card.id} ${c.score.toFixed(2)}`),
+  });
+  scanLog.length = Math.min(scanLog.length, 8);
+  updateDiag();
+}
+
+function diagReport() {
+  const v = els.video;
+  const track = state.stream?.getVideoTracks()[0];
+  const set = track?.getSettings?.() ?? {};
+  const caps = track?.getCapabilities?.() ?? {};
+  const lines = [
+    `PokéScan — ${new Date().toLocaleString('fr-FR')}`,
+    `Navigateur : ${navigator.userAgent}`,
+    `Écran : ${innerWidth}×${innerHeight} @${devicePixelRatio}x · HTTPS : ${isSecureContext ? 'oui' : 'NON'}`,
+    `Mode : ${state.mode} · langue : ${state.lang}`,
+    `Caméra : ${v.videoWidth}×${v.videoHeight} · ${track?.label ?? '—'} · focus ${set.focusMode ?? '?'} · zoom ${set.zoom ?? '?'}` +
+      ` · capacités : ${Object.keys(caps).join(', ') || '—'}`,
+    `Base de cartes : ${state.index ? `${state.index.cards.length} cartes` : state.indexError ? `ERREUR ${state.indexError}` : 'chargement…'}`,
+    `OCR : ${state.ocrStatus ?? '?'} · scans : ${state.scanCount ?? 0} · auto : ${els.auto.checked ? 'oui' : 'non'}`,
+  ];
+  const ranking = tracker.ranking().slice(0, 3);
+  if (ranking.length) lines.push(`Votes : ${ranking.map(v => `${v.cand.card.name} ${v.cand.card.id} ${v.score.toFixed(2)}`).join(' | ')}`);
+  for (const l of scanLog) {
+    lines.push('', `[${l.at}] ${l.mode} · ${l.ms} · netteté ${l.sharp} · ${l.detected ? 'bords détectés' : 'contenu du cadre'}`,
+      `  nom lu : ${l.name || '—'}`, `  bas : ${l.num || '—'} → n° ${l.number}`, `  candidats : ${l.top.join(' | ') || 'aucun'}`);
+  }
+  return lines.join('\n');
+}
+
+function updateDiag() {
+  if (!els.diag.open) return;
+  els.diagText.textContent = diagReport();
+  const card = state.lastReading?.card;
+  if (card) els.diagCrop.getContext('2d').drawImage(card, 0, 0, els.diagCrop.width, els.diagCrop.height);
+}
+
 // ---------------------------------------------------------------- scan automatique
 
 /**
@@ -577,6 +636,7 @@ function startAuto() {
     const res = await scan({ live: true, attempt: attempt++ });
     if (!els.auto.checked) return;
     tracker.add(res);
+    updateDiag();
     const done = tracker.decision();
     if (done) {
       els.auto.checked = false;
@@ -863,6 +923,17 @@ function init() {
   els.closeCollection.addEventListener('click', () => els.collectionDialog.close());
   els.collectionDialog.addEventListener('click', e => { if (e.target === els.collectionDialog) els.collectionDialog.close(); });
   els.exportCsv.addEventListener('click', exportCsv);
+  els.diag.addEventListener('toggle', updateDiag);
+  setInterval(updateDiag, 1500);
+  els.diagCopy.addEventListener('click', async () => {
+    const text = diagReport();
+    try { await navigator.clipboard.writeText(text); els.diagCopy.textContent = '✓ Copié'; } catch {
+      // Presse-papiers refusé : on sélectionne le texte pour une copie manuelle
+      getSelection().selectAllChildren(els.diagText);
+      els.diagCopy.textContent = 'Sélectionné : copiez-le';
+    }
+    setTimeout(() => { els.diagCopy.textContent = 'Copier le rapport'; }, 2000);
+  });
   document.addEventListener('keydown', e => {
     if (e.code === 'Space' && !e.target.closest('input, select, textarea, button, dialog')) {
       e.preventDefault();
