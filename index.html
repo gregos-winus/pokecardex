@@ -42,6 +42,7 @@
       <div id="stage" class="stage">
         <video id="video" playsinline muted autoplay></video>
         <canvas id="photo" class="photo" hidden></canvas>
+        <canvas id="outline" class="outline" aria-hidden="true"></canvas>
         <div id="guide" class="guide" aria-hidden="true">
           <div class="zone zone-name"></div>
           <div class="zone zone-number"></div>
@@ -57,7 +58,7 @@
           <button id="backToCamera" class="icon-btn" type="button" title="Revenir à la caméra" hidden>🎥</button>
         </div>
       </div>
-      <p id="hint" class="hint">Tenez le téléphone à 15–20 cm, la carte dans le cadre, bien éclairée : le nom en haut, le numéro en bas.</p>
+      <p id="hint" class="hint">Remplissez le cadre avec la carte, bien éclairée, sans reflet sur le nom. Un contour vert apparaît quand la carte est repérée.</p>
 
       <div class="controls">
         <button id="scan" class="btn primary big" type="button" disabled>Scanner</button>

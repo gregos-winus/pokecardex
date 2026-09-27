@@ -16,6 +16,7 @@ const els = {
   collectionDialog: $('#collectionDialog'), closeCollection: $('#closeCollection'),
   collectionList: $('#collectionList'), collectionSummary: $('#collectionSummary'), exportCsv: $('#exportCsv'),
   tplResult: $('#tplResult'),
+  outline: $('#outline'),
   diag: $('#diag'), diagText: $('#diagText'), diagCrop: $('#diagCrop'), diagCopy: $('#diagCopy'),
 };
 
@@ -181,7 +182,7 @@ function setMode(mode) {
   showPlaceholder(mode === 'none');
   $('#hint').textContent = mode === 'photo'
     ? 'Déplacez la photo (glisser) et zoomez (pincer ou molette) pour ajuster la carte au cadre, puis « Scanner ».'
-    : 'Tenez le téléphone à 15–20 cm, la carte dans le cadre, bien éclairée : le nom en haut, le numéro en bas.';
+    : 'Remplissez le cadre avec la carte, bien éclairée, sans reflet sur le nom. Un contour vert apparaît quand la carte est repérée.';
   layoutGuide();
 }
 
@@ -193,10 +194,10 @@ function showPlaceholder(show) {
 
 function guideRect() {
   const sw = els.stage.clientWidth, sh = els.stage.clientHeight;
-  // Cadre volontairement pas trop grand : pour le remplir, le téléphone reste à ~15 cm,
-  // distance à laquelle la plupart des appareils photo arrivent à faire la mise au point.
-  let h = sh * 0.78, w = (h * 63) / 88;
-  if (w > sw * 0.9) { w = sw * 0.9; h = (w * 88) / 63; }
+  // Grand cadre : plus la carte est grande à l'écran, plus le nom et le numéro ont de pixels.
+  // (Retour d'un vrai test : ça marche mieux quand la carte remplit, voire dépasse, le cadre.)
+  let h = sh * 0.9, w = (h * 63) / 88;
+  if (w > sw * 0.94) { w = sw * 0.94; h = (w * 88) / 63; }
   return { x: (sw - w) / 2, y: (sh - h) / 2, w, h };
 }
 
@@ -290,10 +291,42 @@ function captureCandidates(cur) {
     if (found && quadArea(found.quad) > g.w * g.h * 0.3) quad = found.quad;
   }
   if (quad) add(quad, true);
+  showOutline(quad);
   add(rectQuad(g), false, 0);
   const ratio = frame.height / frame.width;
   if (state.mode === 'photo' && ratio > 1.2 && ratio < 1.6) add(rectQuad({ x: 0, y: 0, w: frame.width, h: frame.height }), false, 0);
   return out;
+}
+
+/** Contour vert autour de la carte repérée (coordonnées source → écran), effacé après 1,5 s. */
+let outlineTimer = null;
+function showOutline(quad) {
+  const c = els.outline, dpr = window.devicePixelRatio || 1;
+  const w = els.stage.clientWidth, h = els.stage.clientHeight;
+  if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  clearTimeout(outlineTimer);
+  if (!quad) return;
+  let toStage;
+  if (state.mode === 'camera') {
+    const v = els.video, s = Math.max(w / v.videoWidth, h / v.videoHeight);
+    const dx = (w - v.videoWidth * s) / 2, dy = (h - v.videoHeight * s) / 2;
+    toStage = p => [p.x * s + dx, p.y * s + dy];
+  } else {
+    const { scale, tx, ty } = state.photo;
+    toStage = p => [p.x * scale + tx, p.y * scale + ty];
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.beginPath();
+  quad.forEach((p, i) => ctx[i ? 'lineTo' : 'moveTo'](...toStage(p)));
+  ctx.closePath();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#3ccf7a';
+  ctx.shadowColor = 'rgba(0,0,0,.5)';
+  ctx.shadowBlur = 4;
+  ctx.stroke();
+  outlineTimer = setTimeout(() => ctx.clearRect(0, 0, c.width, c.height), 1500);
 }
 
 function clipRect(r, img) {
@@ -449,7 +482,7 @@ async function scan({ live = false, attempt = 0 } = {}) {
   try {
     if (!live) setStatus('Lecture de la carte…', 'busy');
     const T = [performance.now()];
-    const cur = await grabSharpFrame(live ? 300 : 500, live ? 4 : 6);
+    const cur = await grabSharpFrame(live ? 200 : 450, live ? 3 : 5);
     T.push(performance.now());
     let crops = captureCandidates(cur);
     T.push(performance.now());
@@ -663,7 +696,7 @@ function startAuto() {
     }
     const lead = tracker.ranking()[0];
     if (lead && lead.score > 0.3) setStatus(`Lecture… ${lead.cand.card.name} ?`, 'busy');
-    else if (attempt >= 6) setStatus('Toujours rien : reculez un peu si l\'image est floue, évitez les reflets sur le nom', 'warn');
+    else if (attempt >= 6) setStatus('Toujours rien : rapprochez la carte (elle peut dépasser du cadre), évitez les reflets', 'warn');
     else setStatus('Recherche d\'une carte… tenez la carte immobile dans le cadre', 'busy');
     state.autoTimer = setTimeout(tick, 150);
   };

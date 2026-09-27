@@ -20,7 +20,9 @@ export async function getWorkers(lang, onProgress) {
   pending = (async () => {
     const make = async log => {
       const w = await window.Tesseract.createWorker(tl, 1, log ? { logger: m => onProgress?.(m) } : {});
-      await w.setParameters({ user_defined_dpi: '300', preserve_interword_spaces: '1' });
+      // tessedit_do_invert : par défaut Tesseract relit à l'envers chaque ligne mal reconnue (≈ +20 % de temps) ;
+      // la passe « inverted » s'en charge déjà quand c'est utile.
+      await w.setParameters({ user_defined_dpi: '300', preserve_interword_spaces: '1', tessedit_do_invert: '0' });
       return w;
     };
     // Le premier télécharge le modèle ; le second le reprend du cache du navigateur
@@ -39,7 +41,7 @@ async function recognize(w, canvas, psm) {
   return (data.text || '').replace(/\s+/g, ' ').trim();
 }
 
-const NAME_SCALE = 1.5; // ×2 n'apportait rien de mesurable et coûtait ~30 % de temps
+const NAME_SCALE = 1.2; // ×1,2 : aussi précis que ×2 sur 66 vraies photos, 2 fois plus rapide
 
 // Variantes de lecture du nom, dans l'ordre de rentabilité mesuré sur 66 vraies photos.
 // `s` est une source de zones (voir cardSampler / canvasSampler dans vision.js).
