@@ -668,37 +668,73 @@ const tracker = {
   },
 };
 
+/** Détection rapide des bords de la carte, directement sur la vidéo (sans copie de l'image complète). */
+function watchCard() {
+  const v = els.video;
+  if (!v.videoWidth) return null;
+  const g = videoGuide();
+  const mx = g.w * 0.4, my = g.h * 0.3;
+  const region = clipRect({ x: g.x - mx, y: g.y - my, w: g.w + 2 * mx, h: g.h + 2 * my }, { width: v.videoWidth, height: v.videoHeight });
+  const found = region && detectCard(v, region);
+  return found && quadArea(found.quad) > g.w * g.h * 0.3 ? { quad: found.quad, size: g.h } : null;
+}
+
+const quadsClose = (a, b, tol) => a.every((p, i) => Math.hypot(p.x - b[i].x, p.y - b[i].y) < tol);
+
+/**
+ * Scan automatique en deux temps :
+ * 1. surveillance : on cherche seulement les bords de la carte (rapide), plusieurs fois par seconde ;
+ * 2. lecture (OCR, lente) : dès que la carte est repérée au même endroit sur deux images de suite.
+ * Sans carte repérée pendant 2,5 s, on lit quand même le contenu du cadre (bords peu visibles).
+ */
 function startAuto() {
   stopAuto();
   if (state.mode !== 'camera') return;
   els.auto.checked = true;
   tracker.reset();
-  setStatus('Recherche d\'une carte… tenez la carte immobile dans le cadre', 'busy');
+  setStatus('Placez la carte dans le cadre…', 'busy');
   let attempt = 0;
-  const tick = async () => {
-    if (!els.auto.checked || state.mode !== 'camera') return;
+  let lastQuad = null;
+  let lastRead = performance.now();
+
+  const read = async () => {
+    lastRead = performance.now();
     const res = await scan({ live: true, attempt: attempt++ });
-    if (!els.auto.checked) return;
+    if (!els.auto.checked) return true;
     tracker.add(res);
     updateDiag();
     const done = tracker.decision();
     if (done) {
       els.auto.checked = false;
       const ranking = tracker.ranking();
-      const result = {
+      showResult({
         ...done.result,
         top: done.cand,
         alternatives: ranking.filter(v => v !== done).map(v => v.cand).slice(0, 8),
         confidence: done.strong || done.score >= 2 ? 'high' : 'medium',
-      };
-      showResult(result);
-      return;
+      });
+      return true;
     }
     const lead = tracker.ranking()[0];
     if (lead && lead.score > 0.3) setStatus(`Lecture… ${lead.cand.card.name} ?`, 'busy');
     else if (attempt >= 6) setStatus('Toujours rien : rapprochez la carte (elle peut dépasser du cadre), évitez les reflets', 'warn');
-    else setStatus('Recherche d\'une carte… tenez la carte immobile dans le cadre', 'busy');
-    state.autoTimer = setTimeout(tick, 150);
+    return false;
+  };
+
+  const tick = async () => {
+    if (!els.auto.checked || state.mode !== 'camera') return;
+    const seen = watchCard();
+    showOutline(seen?.quad ?? null);
+    const stable = seen && lastQuad && quadsClose(seen.quad, lastQuad, seen.size * 0.04);
+    lastQuad = seen?.quad ?? null;
+    let finished = false;
+    if (stable || performance.now() - lastRead > 2500) {
+      // lastQuad est conservé : si la carte n'a pas bougé pendant la lecture, la suivante part aussitôt
+      finished = await read();
+    } else if (!tracker.ranking()[0]) {
+      setStatus(seen ? 'Carte repérée, ne bougez plus…' : 'Placez la carte dans le cadre…', 'busy');
+    }
+    if (!finished && els.auto.checked) state.autoTimer = setTimeout(tick, 120);
   };
   tick();
 }
